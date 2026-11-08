@@ -203,8 +203,17 @@ table.res tr.me td{color:var(--amber);font-weight:700;}
         <button type="button" data-v="5" aria-pressed="false">5 周</button>
       </div>
     </div>
+    <div class="opt">
+      <span class="lbl">画質</span>
+      <div class="seg" id="segQuality">
+        <button type="button" data-v="auto" aria-pressed="true">自動</button>
+        <button type="button" data-v="high" aria-pressed="false">高画質</button>
+        <button type="button" data-v="low" aria-pressed="false">軽量</button>
+      </div>
+    </div>
     <p class="best-note" id="bestNote"></p>
     <p class="hint" id="modelStatus">車体モデル：読み込み中…</p>
+    <p class="hint" id="qualityNote"></p>
     <button id="bStart" type="button" class="primary">スタート</button>
     <dl class="keys" id="keysPC">
       <dt>↑ / W</dt><dd>アクセル</dd>

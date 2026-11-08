@@ -7,14 +7,37 @@ const IS_TOUCH=(window.matchMedia&&matchMedia('(pointer: coarse)').matches)||('o
 if(IS_TOUCH){document.body.classList.add('is-touch');$('keysPC').hidden=true;$('keysTouch').hidden=false;
   const sp=document.querySelector('.hud-speed');sp.classList.add('chip');document.querySelector('.hud-tl').appendChild(sp);}
 
+/* ================= Quality (auto / high / low) ================= */
+// Without a GPU the browser rasterises WebGL on the CPU (SwiftShader, llvmpipe...). Cost there is roughly
+// pixels x shader work, so the low preset renders fewer pixels, drops shadows and bump maps, shortens the
+// draw distance, thins out trees/particles and caps the frame rate at 30 fps. Physics and AI are unchanged.
+const QKEY='apexcircuit-quality';
+let QPREF='auto';
+try{QPREF=localStorage.getItem(QKEY)||'auto';}catch(e){}
+{const q=new URLSearchParams(location.search).get('quality');if(q==='auto'||q==='high'||q==='low')QPREF=q;}
+const GPU_INFO=(()=>{try{
+  const strict=document.createElement('canvas').getContext('webgl',{failIfMajorPerformanceCaveat:true});
+  const gl=strict||document.createElement('canvas').getContext('webgl');
+  if(!gl)return {soft:true,name:'WebGL unavailable'};
+  const ext=gl.getExtension('WEBGL_debug_renderer_info');
+  const name=String(gl.getParameter(ext?ext.UNMASKED_RENDERER_WEBGL:gl.RENDERER));
+  const soft=!strict||/swiftshader|llvmpipe|softpipe|software|basic render/i.test(name);
+  const lose=gl.getExtension('WEBGL_lose_context');if(lose)lose.loseContext();
+  return {soft,name};
+}catch(e){return {soft:false,name:'?'};}})();
+const LOW=QPREF==='low'||(QPREF==='auto'&&GPU_INFO.soft);
+
 /* ================= Renderer / Scene ================= */
-const renderer=new THREE.WebGLRenderer({antialias:!IS_TOUCH,powerPreference:'high-performance'});
-renderer.setPixelRatio(Math.min(window.devicePixelRatio||1,IS_TOUCH?1.5:2));
-renderer.shadowMap.enabled=true;
+const renderer=new THREE.WebGLRenderer({antialias:!IS_TOUCH&&!LOW,powerPreference:'high-performance'});
+// render scale: LOW starts at 60 % of 1x and dynamic resolution (qualityTick) adapts it to the frame time
+const DPR_BASE=LOW?Math.min(window.devicePixelRatio||1,1):Math.min(window.devicePixelRatio||1,IS_TOUCH?1.5:2);
+let renderScale=LOW?0.6:1;
+renderer.setPixelRatio(DPR_BASE*renderScale);
+renderer.shadowMap.enabled=!LOW;
 renderer.shadowMap.type=THREE.PCFSoftShadowMap;
 $('stage').appendChild(renderer.domElement);
 const scene=new THREE.Scene();
-const camera=new THREE.PerspectiveCamera(62,1,0.1,4200);
+const camera=new THREE.PerspectiveCamera(62,1,0.1,LOW?430:4200);
 const FOG=0xbfd2e2;
 scene.fog=new THREE.Fog(FOG,220,1700);
 
@@ -25,6 +48,7 @@ const skyMat=new THREE.ShaderMaterial({
   fragmentShader:'uniform vec3 top;uniform vec3 mid;uniform vec3 bot;varying vec3 vP;void main(){float h=vP.y;vec3 c=h>0.0?mix(mid,top,pow(clamp(h,0.0,1.0),0.55)):mix(mid,bot,clamp(-h*4.0,0.0,1.0));gl_FragColor=vec4(c,1.0);}'
 });
 const sky=new THREE.Mesh(new THREE.SphereGeometry(3200,32,16),skyMat);
+if(LOW)sky.scale.setScalar(0.12);   // keep the sky inside the shorter LOW far plane
 scene.add(sky);
 // environment reflections from the sky
 const envGen=(()=>{
@@ -177,7 +201,7 @@ function instProp(name,mats,shadow){
   const v=new THREE.Vector3();
   for(const pt of parts){
     const triCount=pt.g.index?pt.g.index.count/3:(pt.g.attributes.position.count/3);
-    const cellSize=!shadow&&triCount<=300?640:160;
+    const cellSize=LOW?1e6:(!shadow&&triCount<=300?640:160);   // LOW has no shadow pass: fewer, larger batches
     const cells=new Map();
     for(const m of mats){v.setFromMatrixPosition(m);const key=Math.floor(v.x/cellSize)+','+Math.floor(v.z/cellSize);if(!cells.has(key))cells.set(key,[]);cells.get(key).push(m);}
     if(!pt.g.boundingSphere)pt.g.computeBoundingSphere();
@@ -192,6 +216,11 @@ function instProp(name,mats,shadow){
       const im=new THREE.InstancedMesh(g,pt.m,list.length);
       if(pt.m.userData.depth)im.customDepthMaterial=pt.m.userData.depth;
       list.forEach((m,i)=>im.setMatrixAt(i,m));
+      if(LOW){   // keep every matrix + ground position; decorCull() packs only the nearby ones into the live buffer
+        im.userData.all=im.instanceMatrix.array.slice();const P=new Float32Array(list.length*2);
+        list.forEach((m,i)=>{P[i*2]=m.elements[12];P[i*2+1]=m.elements[14];});im.userData.pos=P;
+        (decorGroup.userData.cull||(decorGroup.userData.cull=[])).push(im);
+      }
       im.castShadow=!!shadow;im.receiveShadow=!pt.m.userData.noReceive;im.matrixAutoUpdate=false;im.updateMatrix();
       decorGroup.add(im);
     });
@@ -443,7 +472,7 @@ function decorate(){
   names.forEach(n=>instProp(n,bb[n],true));instProp('Prop_Marshal',mp,true);
   // trees (pines on the mountain pass, mixed elsewhere)
   const pines=[],oaks=[],oaksFar=[],R=rng(77);
-  for(const t of TREES){const k=t[2]*4.2,m=propMat(t[0],t[3]+0.2,t[1],R()*6.28,k,k*(0.9+R()*0.3),k);(def.guardrail||R()<0.55?pines:(t[4]&&PROPS.Prop_OakFar?oaksFar:oaks)).push(m);}
+  for(const t of TREES){const k=t[2]*4.2,m=propMat(t[0],t[3]+0.2,t[1],R()*6.28,k,k*(0.9+R()*0.3),k);(def.guardrail||R()<0.55?pines:((t[4]||LOW)&&PROPS.Prop_OakFar?oaksFar:oaks)).push(m);}
   // mountain pass: trees scattered at random along the roadside, except on the grandstand straight
   if(def.guardrail){
     let a0=GSI,a1=GSI;
@@ -458,7 +487,7 @@ function decorate(){
       // same size range as the other trees; trunks set back far enough that crowns only just reach over the barrier
       const k=(0.7+R()*0.9)*4.2,s2=R()<0.5?1:-1,off=OF(i,s2*(WALL+3+2.8*k*0.55+R()*6)),x=PX[i]+SX[i]*off,z=PZ[i]+SZ[i]*off;
       const m=propMat(x,groundY(x,z),z,R()*6.28,k,k*(0.85+R()*0.3),k);
-      (R()<0.85?pines:oaks).push(m);
+      (R()<0.85?pines:(LOW&&PROPS.Prop_OakFar?oaksFar:oaks)).push(m);
     }
   }
   // circuit trees all stand 100 m+ from the track, outside the car-centred shadow box, so they skip the shadow pass
@@ -819,11 +848,11 @@ function buildTrack(ci){
   {
     const nearTrack=(x,z,d)=>{const d2=d*d;for(let i=0;i<N;i+=3){const dx=x-PX[i],dz=z-PZ[i];if(dx*dx+dz*dz<d2)return true;}return false;};
     const gsx=PX[gsi]-SX[gsi]*(WALL+30),gsz=PZ[gsi]-SZ[gsi]*(WALL+30),pbx=PX[gsi]+SX[gsi]*(WALL+40),pbz=PZ[gsi]+SZ[gsi]*(WALL+40);
-    const want=Math.round((IS_TOUCH?220:320)*(def.trees||1));
+    const want=Math.round((IS_TOUCH?220:320)*(def.trees||1)*(LOW?0.3:1));
     const spots=[];let tries=0;
     if(!def.guardrail){
       // circuits: open grass out to 500 m, then a forest belt 500-600 m from the track
-      const D0=500,D1=600,st=IS_TOUCH?21:17;
+      const D0=500,D1=600,st=LOW?(IS_TOUCH?44:40):(IS_TOUCH?21:17);
       const near2=(x,z,d)=>{const d2=d*d;for(let i=0;i<N;i+=2){const dx=x-PX[i],dz=z-PZ[i];if(dx*dx+dz*dz<d2)return true;}return false;};
       // even-odd test against the centre line: nothing grows in the infield (both loops of the figure 8)
       const inside=(x,z)=>{let c=false;for(let i=0,j=N-1;i<N;j=i++){if((PZ[i]>z)!==(PZ[j]>z)&&x<(PX[j]-PX[i])*(z-PZ[i])/(PZ[j]-PZ[i])+PX[i])c=!c;}return c;};
@@ -928,6 +957,14 @@ const cars=CAR_DEFS.map(d=>{
     skill:1,eng:1,laneOff:0,laneBase:0,finished:false,finishT:0,lapStart:0,lastLap:0,bestLap:Infinity,spin:0},v);
 });
 const player=cars[cars.length-1];
+if(LOW){
+  const cv=document.createElement('canvas');cv.width=cv.height=64;
+  const g2=cv.getContext('2d'),gr=g2.createRadialGradient(32,32,6,32,32,32);
+  gr.addColorStop(0,'rgba(0,0,0,0.55)');gr.addColorStop(1,'rgba(0,0,0,0)');g2.fillStyle=gr;g2.fillRect(0,0,64,64);
+  const bm=new THREE.MeshBasicMaterial({map:new THREE.CanvasTexture(cv),transparent:true,depthWrite:false,polygonOffset:true,polygonOffsetFactor:-2,polygonOffsetUnits:-2});
+  const bg=new THREE.PlaneGeometry(2.8,6.0);bg.rotateX(-Math.PI/2);
+  for(const c of cars){const s=new THREE.Mesh(bg,bm);s.position.y=0.05;s.renderOrder=1;s.userData.keep=1;c.group.add(s);}
+}
 
 /* ================= Blender car model (APEX GT) ================= */
 const CAR_SCALE=1.5;
@@ -1036,7 +1073,8 @@ function applyModel(gltf){
     const wheelSet=new Set(wheels.map(w=>w.node));
     wrap.updateMatrix();wrap.matrixAutoUpdate=false;
     m.traverse(o=>{if(!wheelSet.has(o)){o.updateMatrix();o.matrixAutoUpdate=false;}});
-    c.group.children.slice().forEach(ch=>{ch.visible=false;});
+    const simple=c.group.children.filter(ch=>!ch.userData.keep);   // procedural body: kept hidden, reused as the LOW far LOD
+    simple.forEach(ch=>{ch.visible=false;});
     c.group.add(wrap);
     // headlight glows (shown in rain and at dusk)
     {if(!HEAD.z){const bb=new THREE.Box3().setFromObject(src);HEAD.z=-bb.min.z*CAR_SCALE-0.05;HEAD.x=bb.max.x*CAR_SCALE*0.66;HEAD.y=(bb.min.y+(bb.max.y-bb.min.y)*0.36)*CAR_SCALE+0.03;}
@@ -1046,7 +1084,7 @@ function applyModel(gltf){
     m.traverse(o=>{if(o.isMesh&&o.material&&FINE.test(o.material.name))fine.push(o);});
     // tyres swap to a 24-sided version at distance
     const tyres=[];m.traverse(o=>{if(o.isMesh&&o.material&&o.material.name==='Tire'){tyres.push([o,o.geometry,tyreLow(o.geometry)]);}});
-    c.model={wheels,tail:tail||c.tailMat,fine,tyres,near:true};
+    c.model={wheels,tail:tail||c.tailMat,fine,tyres,near:true,wrap,simple,lodFar:false};
   });
 }
 const _qS=new THREE.Quaternion(),_qX=new THREE.Quaternion(),_Y=new THREE.Vector3(0,1,0),_X=new THREE.Vector3(1,0,0);
@@ -1440,7 +1478,7 @@ function updateCamera(dt){
 }
 /* ================= Tyre smoke ================= */
 // One pooled point cloud for every car: rear tyres puff smoke while sliding sideways (drifts, handbrake turns).
-const SMOKE_MAX=IS_TOUCH?320:520;
+const SMOKE_MAX=LOW?240:(IS_TOUCH?320:520);
 const smk={pos:new Float32Array(SMOKE_MAX*3),vel:new Float32Array(SMOKE_MAX*3),age:new Float32Array(SMOKE_MAX).fill(9),life:new Float32Array(SMOKE_MAX).fill(1),
   size:new Float32Array(SMOKE_MAX),alpha:new Float32Array(SMOKE_MAX),next:0,acc:new Float32Array(10),dacc:new Float32Array(10),sacc:new Float32Array(10),
   col:new Float32Array(SMOKE_MAX*3),grow:new Float32Array(SMOKE_MAX).fill(1),amax:new Float32Array(SMOKE_MAX).fill(0.62)};
@@ -1543,8 +1581,11 @@ function updateCarVisuals(dt){
         if(w.front)w.node.quaternion.premultiply(_qS);
       }
       c.model.tail.emissiveIntensity=c.brake>0?2.5:(WX[WEATHER].lights?1.3:0.5);
-      {const dx=c.x-camera.position.x,dz=c.z-camera.position.z,d2=dx*dx+dz*dz,near=c.model.near?d2<38*38:d2<32*32;
-       if(near!==c.model.near){c.model.near=near;for(const o of c.model.fine)o.visible=near;for(const t of c.model.tyres)t[0].geometry=near?t[1]:t[2];}}
+      {const dx=c.x-camera.position.x,dz=c.z-camera.position.z,d2=dx*dx+dz*dz,near=LOW?false:(c.model.near?d2<38*38:d2<32*32);
+       if(near!==c.model.near){c.model.near=near;for(const o of c.model.fine)o.visible=near;for(const t of c.model.tyres)t[0].geometry=near?t[1]:t[2];}
+       // LOW: CPU cars beyond ~20 m swap the ~110k-triangle model for the simple procedural body
+       if(LOW&&!c.isPlayer){const far=c.model.lodFar?d2>17*17:d2>20*20;
+         if(far!==c.model.lodFar){c.model.lodFar=far;c.model.wrap.visible=!far;for(const o of c.model.simple)o.visible=far;}}}
       continue;
     }
     for(const w of c.wheels)w.rotation.x+=vf*dt/0.36;
@@ -1566,7 +1607,7 @@ const glowMat=new THREE.SpriteMaterial({map:smokeTex,color:0xfff1d2,blending:THR
 // player headlight beam lighting the road ahead (intensity 0 in clear weather, so no shader change between weathers)
 const headSpot=new THREE.SpotLight(0xfff0d8,0,80,0.55,0.55,1.2);scene.add(headSpot);scene.add(headSpot.target);
 // rain: streaks in a box that follows the camera, wrapped in world space so they stream past as you drive
-const RAIN_N=IS_TOUCH?1500:2800,RB=[64,34,64];
+const RAIN_N=LOW?900:(IS_TOUCH?1500:2800),RB=[64,34,64];
 const rainPos=new Float32Array(RAIN_N*6),rainW=new Float32Array(RAIN_N*3);
 for(let i=0;i<RAIN_N;i++){rainW[i*3]=Math.random()*RB[0];rainW[i*3+1]=Math.random()*RB[1];rainW[i*3+2]=Math.random()*RB[2];}
 const rainGeo=new THREE.BufferGeometry();rainGeo.setAttribute('position',new THREE.BufferAttribute(rainPos,3).setUsage(THREE.DynamicDrawUsage));
@@ -1575,7 +1616,7 @@ rain.frustumCulled=false;rain.visible=false;rain.renderOrder=7;scene.add(rain);
 let rainT=0;
 function applyWeather(w){
   WEATHER=w;const P=WX[w];
-  scene.fog.color.setHex(P.fog);scene.fog.near=P.fn;scene.fog.far=P.ff;
+  scene.fog.color.setHex(P.fog);scene.fog.near=LOW?Math.min(P.fn,60):P.fn;scene.fog.far=LOW?Math.min(P.ff,390):P.ff;
   skyMat.uniforms.top.value.setHex(P.top);skyMat.uniforms.mid.value.setHex(P.mid);skyMat.uniforms.bot.value.setHex(P.bot);
   hemi.color.setHex(P.hs);hemi.groundColor.setHex(P.hg);hemi.intensity=P.hi;
   sun.color.setHex(P.sc);sun.intensity=P.si;SUN_OFF[0]=P.so[0];SUN_OFF[1]=P.so[1];SUN_OFF[2]=P.so[2];
@@ -1584,6 +1625,7 @@ function applyWeather(w){
   if(HILL_MAT)HILL_MAT.color.setHex(P.hill==null?HILL_MAT.userData.base:P.hill);
   for(const g of GLOWS)g.visible=P.lights>0;
   headSpot.intensity=P.lights?(w===1?2.2:1.6):0;
+  if(LOW)headSpot.visible=headSpot.intensity>0;   // an unlit spot still costs per-vertex lighting work
   rain.visible=!!P.rain;
   for(const m of RAIN_MATS)m.emissiveIntensity=1;
 }
@@ -1604,6 +1646,8 @@ function weatherUpdate(dt){
   rainGeo.attributes.position.needsUpdate=true;
 }
 WX_READY=true;applyWeather(WEATHER);
+document.querySelectorAll('#segQuality button').forEach(b=>b.setAttribute('aria-pressed',b.dataset.v===QPREF?'true':'false'));
+{const e=$('qualityNote');if(e)e.textContent='画質：'+(LOW?'軽量':'高画質')+(QPREF==='auto'?'（自動判定'+(GPU_INFO.soft?'・GPU アクセラレーションなし）':'）'):'（手動設定）');}
 document.querySelectorAll('#segWeather button').forEach(b=>b.setAttribute('aria-pressed',+b.dataset.v===WEATHER?'true':'false'));
 
 /* ================= Flow ================= */
@@ -1667,6 +1711,8 @@ document.querySelectorAll('.seg').forEach(seg=>{
   seg.addEventListener('click',e=>{
     const b=e.target.closest('button');if(!b)return;
     seg.querySelectorAll('button').forEach(x=>x.setAttribute('aria-pressed',x===b?'true':'false'));
+    if(seg.id==='segQuality'){const v=b.dataset.v;if(v!==QPREF){try{localStorage.setItem(QKEY,v);}catch(_){}
+      const u=new URL(location.href);u.searchParams.delete('quality');location.replace(u.href);}return;}
     if(seg.id==='segDiff'){DIFF=+b.dataset.v;updateBestNote();}
     else if(seg.id==='segCam'){camMode=+b.dataset.v;}
     else if(seg.id==='segSnd'){muted=b.dataset.v==='0';if(master)master.gain.value=muted?0:0.9;}
@@ -1693,8 +1739,65 @@ addEventListener('resize',resize);resize();
 /* ================= Main loop ================= */
 let last=performance.now();
 const STEP=1/120;
+// LOW: as tracks, props and the car model are (re)built, PBR materials are swapped for per-vertex Lambert
+// copies (far cheaper per pixel on a CPU rasteriser) and bump/normal maps are dropped. Brake-light materials
+// change every frame and stay as they are; other runtime changes (weather) are copied over on each pass.
+const _lowMat=new Map(),_lowKeep=new WeakSet();
+function lowMat(m){
+  if(!m.isMeshStandardMaterial||_lowKeep.has(m))return m;
+  let L=_lowMat.get(m);
+  if(!L){
+    L=new THREE.MeshLambertMaterial({map:m.map,emissiveMap:m.emissiveMap,alphaTest:m.alphaTest,transparent:m.transparent,side:m.side,
+      vertexColors:m.vertexColors,fog:m.fog,depthWrite:m.depthWrite,depthTest:m.depthTest,
+      polygonOffset:m.polygonOffset,polygonOffsetFactor:m.polygonOffsetFactor,polygonOffsetUnits:m.polygonOffsetUnits});
+    L.name=m.name;L.userData=m.userData;
+    // foliage cards: light both faces like the front face (the PBR version does the same via its normal chunk)
+    if(m.alphaTest>0&&m.side===THREE.DoubleSide)L.onBeforeCompile=sh=>{sh.fragmentShader=sh.fragmentShader
+      .replace('( gl_FrontFacing ) ? vIndirectFront : vIndirectBack','vIndirectFront').replace('( gl_FrontFacing ) ? vLightFront : vLightBack','vLightFront');};
+    _lowMat.set(m,L);
+  }
+  return L;
+}
+function lowifyScene(){
+  for(const c of cars){_lowKeep.add(c.tailMat);if(c.model)_lowKeep.add(c.model.tail);}
+  const used=new Set();
+  scene.traverse(o=>{const ms=o.material;if(!ms||!o.isMesh)return;
+    if(Array.isArray(ms))o.material=ms.map(lowMat);else o.material=lowMat(ms);
+    for(const m of Array.isArray(o.material)?o.material:[o.material]){used.add(m);if(m.bumpMap||m.normalMap){m.bumpMap=null;m.normalMap=null;m.needsUpdate=true;}
+      // anisotropic filtering is very expensive on a CPU rasteriser
+      if(m.map&&m.map.anisotropy>1){m.map.anisotropy=1;m.map.needsUpdate=true;}}});
+  // copy runtime changes (weather) over; forget copies whose meshes were removed with a rebuilt track
+  _lowMat.forEach((L,m)=>{if(!used.has(L)){_lowMat.delete(m);return;}
+    L.color.copy(m.color);L.emissive.copy(m.emissive);L.emissiveIntensity=m.emissiveIntensity;L.opacity=m.opacity;L.visible=m.visible;});
+}
+// LOW: per-instance draw distance for trackside props (trees, tyre walls, fences, billboards...)
+const DECOR_R=360;
+function decorCull(){
+  const list=decorGroup&&decorGroup.userData.cull;if(!list)return;
+  const cx=camera.position.x,cz=camera.position.z,R2=DECOR_R*DECOR_R;
+  for(const im of list){
+    const A=im.userData.all,P=im.userData.pos,dst=im.instanceMatrix.array,k=P.length>>1;let n=0;
+    for(let i=0;i<k;i++){const dx=P[i*2]-cx,dz=P[i*2+1]-cz;if(dx*dx+dz*dz<R2){dst.set(A.subarray(i*16,i*16+16),n*16);n++;}}
+    if(n!==im.count||n){im.count=n;im.instanceMatrix.needsUpdate=true;}
+  }
+}
+// dynamic resolution: lower the render scale when frames run long, raise it again when there is headroom
+let qAcc=0,qN=0,qFrame=0;
+function qualityTick(dt){
+  qFrame++;
+  if(state!=='race'&&state!=='countdown'&&state!=='finished'){qAcc=qN=0;return;}
+  qAcc+=dt;qN++;
+  if(qAcc<1.5)return;
+  const ms=qAcc/qN*1000;qAcc=qN=0;
+  let s=renderScale;
+  if(LOW){if(ms>45)s=Math.max(0.35,s-0.1);else if(ms<36)s=Math.min(0.8,s+0.05);}
+  else{if(ms>26)s=Math.max(0.6,s-0.1);else if(ms<18)s=Math.min(1,s+0.05);}
+  s=Math.round(s*100)/100;
+  if(s!==renderScale){renderScale=s;renderer.setPixelRatio(DPR_BASE*renderScale);}
+}
 function frame(now){
   requestAnimationFrame(frame);
+  if(LOW&&now-last<1000/30-4)return;   // LOW: render at most ~30 fps (physics still sub-steps at 120 Hz)
   let dt=Math.min(0.05,(now-last)/1000);last=now;
   if(state==='countdown'){countdown(dt);playerInput();}
   if(state==='race'||state==='finished'){
@@ -1717,7 +1820,10 @@ function frame(now){
   updateCamera(dt);
   if(state!=='menu'&&state!=='paused'&&state!=='results')updateHud(dt);
   updateAudio();
+  if(LOW&&qFrame%30===0)lowifyScene();
+  if(LOW&&qFrame%8===0)decorCull();
   renderer.render(scene,camera);
+  qualityTick(dt);
 }
 placeGrid();updateBestNote();
 requestAnimationFrame(frame);
