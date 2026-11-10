@@ -29,9 +29,10 @@ URL に `?quality=low` / `?quality=high` を付けて切り替えることもで
 - 影をオフにして車の下に簡易影を表示、アンチエイリアスなし
 - 材質を軽いライティング（Lambert）に置き換え、凹凸マップと異方性フィルタリングを省略
 - 霧を手前に寄せ、コース脇の木・タイヤバリア・フェンスは約 360 m 以内だけ描画、木の本数を削減
-- 500 m より遠い CPU カーは簡易ボディで描画、煙・雨の粒子を削減、描画は最大 30 fps
+- CPU カーは 15 m 以内は詳細モデル、15〜500 m は簡略化モデル（約 1/5 の三角形、`models/apex_lod1.glb`）、500 m より遠いと簡易ボディ
+- 煙・雨の粒子を削減、描画は最大 30 fps
 
-GPU を無効にした Chrome（ソフトウェア描画）での計測では、高画質 約 0.5 fps → 軽量 約 11〜14 fps でした。
+GPU を無効にした Chrome（ソフトウェア描画）での計測では、高画質 約 0.5 fps → 軽量 約 17〜29 fps（コース・場面による）でした。
 
 ## 構成
 
@@ -39,10 +40,11 @@ GPU を無効にした Chrome（ソフトウェア描画）での計測では、
 docs/                GitHub Pages で公開されるサイト（ビルド結果）
   index.html         ページ本体（HUD・メニュー・CSS）
   js/game.js         ゲーム本体
-  models/*.glb       車体・コース小物の glTF モデル
+  models/*.glb       車体・コース小物の glTF モデル（apex_lod1.glb は軽量モード用の簡略化車体）
 game.html            ゲームコードのソース
 src/shell.html       ページの HTML/CSS テンプレート
 build_docs.py        game.html + src/shell.html から docs/ を生成
+tools/make_lod.py    Blender で簡略化車体を作るスクリプト（blender -b -P tools/make_lod.py -- in.glb out.glb 0.2）
 ```
 
 ゲームを修正したら `game.html` を編集して `python build_docs.py` を実行し、`docs/` をコミットしてください。
