@@ -1028,8 +1028,7 @@ function tyreLow(g){
   const lg=new THREE.LatheGeometry(prof,24);lg.rotateZ(-Math.PI/2);lg.translate(cx,(b.max.y+b.min.y)/2,(b.max.z+b.min.z)/2);
   _tyreLowCache.set(g,lg);return lg;
 }
-function applyModel(gltf){
-  const src=gltf.scene;
+function prepCarSource(src){
   // the scene renders without sRGB output, so bring the model's linear colours into display space
   const seen=new Set();
   src.traverse(o=>{if(o.isMesh&&!seen.has(o.material)){seen.add(o.material);o.material.color.convertLinearToSRGB();if(o.material.emissive)o.material.emissive.convertLinearToSRGB();}});
@@ -1047,6 +1046,10 @@ function applyModel(gltf){
     if(!o.material.map){o.material.map=carbonTex;o.material.color.setRGB(1,1,1);o.material.needsUpdate=true;}
   });
   mergeStatic(src);
+}
+function applyModel(gltf){
+  const src=gltf.scene;
+  prepCarSource(src);
   cars.forEach((c,ci)=>{
     const wrap=new THREE.Group();wrap.rotation.y=Math.PI;wrap.scale.setScalar(CAR_SCALE);wrap.position.y=0.03;
     const m=src.clone(true);wrap.add(m);
@@ -1084,8 +1087,38 @@ function applyModel(gltf){
     m.traverse(o=>{if(o.isMesh&&o.material&&FINE.test(o.material.name))fine.push(o);});
     // tyres swap to a 24-sided version at distance
     const tyres=[];m.traverse(o=>{if(o.isMesh&&o.material&&o.material.name==='Tire'){tyres.push([o,o.geometry,tyreLow(o.geometry)]);}});
-    c.model={wheels,tail:tail||c.tailMat,fine,tyres,near:true,wrap,simple,lodFar:false};
+    c.model={wheels,tail:tail||c.tailMat,fine,tyres,near:true,wrap,simple,lodFar:false,lv:0,lod:null};
   });
+  loadCarLod();
+}
+// LOW: a reduced-polygon APEX GT (models/apex_lod1.glb, ~32k instead of ~140k triangles, interior removed)
+// for CPU cars between ~15 m and 500 m. It shares the full model's materials, so paint, stripes and brake
+// lights match exactly. If the file is not there (e.g. the single-file build) the full model is kept.
+function loadCarLod(){
+  if(!LOW||!THREE.GLTFLoader)return;
+  fetch('models/apex_lod1.glb').then(r=>{if(!r.ok)throw new Error('HTTP '+r.status);return r.arrayBuffer();})
+    .then(buf=>new THREE.GLTFLoader().parse(buf,'',applyCarLod,()=>{})).catch(()=>{});
+}
+function applyCarLod(gltf){
+  const src=gltf.scene;prepCarSource(src);
+  for(const c of cars){
+    if(c.isPlayer||!c.model)continue;
+    const mats={};c.model.wrap.traverse(o=>{if(o.isMesh&&o.material&&o.material.name)mats[o.material.name]=o.material;});
+    const wrap=new THREE.Group();wrap.rotation.y=Math.PI;wrap.scale.setScalar(CAR_SCALE);wrap.position.y=0.03;
+    const m=src.clone(true);wrap.add(m);
+    m.traverse(o=>{if(o.isMesh&&o.material&&mats[o.material.name])o.material=mats[o.material.name];});
+    const wheels=[];
+    ['Wheel_FL','Wheel_FR','Wheel_RL','Wheel_RR'].forEach(n=>{
+      const w=m.getObjectByName(n);if(!w)return;
+      wheels.push({node:w,q0:w.quaternion.clone(),front:n.charAt(6)==='F',sgn:Math.abs(w.quaternion.y)>0.5?1:-1,a:0});
+    });
+    const wheelSet=new Set(wheels.map(w=>w.node));
+    wrap.updateMatrix();wrap.matrixAutoUpdate=false;
+    m.traverse(o=>{if(!wheelSet.has(o)){o.updateMatrix();o.matrixAutoUpdate=false;}});
+    wrap.visible=false;c.group.add(wrap);
+    for(const w of wheels)c.model.wheels.push(w);   // spun together with the full model's wheels
+    c.model.lod=wrap;c.model.lv=-1;                  // force a level pick on the next frame
+  }
 }
 const _qS=new THREE.Quaternion(),_qX=new THREE.Quaternion(),_Y=new THREE.Vector3(0,1,0),_X=new THREE.Vector3(1,0,0);
 function setModelStatus(t,ok){const e=document.getElementById('modelStatus');if(e){e.textContent=t;e.dataset.ok=ok?'1':'0';}}
@@ -1583,9 +1616,12 @@ function updateCarVisuals(dt){
       c.model.tail.emissiveIntensity=c.brake>0?2.5:(WX[WEATHER].lights?1.3:0.5);
       {const dx=c.x-camera.position.x,dz=c.z-camera.position.z,d2=dx*dx+dz*dz,near=LOW?false:(c.model.near?d2<38*38:d2<32*32);
        if(near!==c.model.near){c.model.near=near;for(const o of c.model.fine)o.visible=near;for(const t of c.model.tyres)t[0].geometry=near?t[1]:t[2];}
-       // LOW: CPU cars beyond 500 m swap the ~110k-triangle model for the simple procedural body
-       if(LOW&&!c.isPlayer){const far=c.model.lodFar?d2>480*480:d2>500*500;
-         if(far!==c.model.lodFar){c.model.lodFar=far;c.model.wrap.visible=!far;for(const o of c.model.simple)o.visible=far;}}}
+       // LOW: CPU cars use the full model up close, the reduced-polygon LOD to 500 m, the simple body beyond
+       if(LOW&&!c.isPlayer){const M=c.model,cur=M.lv;
+         let lv=cur<=0?(d2>15*15?1:0):(d2<13*13?0:1);
+         if(lv===1&&(cur===2?d2>480*480:d2>500*500))lv=2;
+         if(lv===1&&!M.lod)lv=0;
+         if(lv!==cur){M.lv=lv;M.lodFar=lv===2;M.wrap.visible=lv===0;if(M.lod)M.lod.visible=lv===1;for(const o of M.simple)o.visible=lv===2;}}}
       continue;
     }
     for(const w of c.wheels)w.rotation.x+=vf*dt/0.36;
