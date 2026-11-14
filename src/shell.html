@@ -2,7 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
 <title>Apex Circuit</title>
 <meta name="description" content="Apex Circuit — ブラウザで遊べる3Dサーキットレースゲーム。CPU 4台と3つのコース、天候切り替えに対応。">
 <meta name="theme-color" content="#0b1016">
@@ -130,6 +130,14 @@ table.res tr.me td{color:var(--amber);font-weight:700;}
   .panel{gap:12px;padding:16px;}
 }
 @media (prefers-reduced-motion:reduce){#msg{transition:none;}}
+</style>
+<style id="mobile-touch-fix">
+/* スマホ: ダブルタップ拡大・長押し選択・長押しメニューを無効化 */
+html{touch-action:manipulation;}
+html,body{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent;overscroll-behavior:none;}
+*{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;}
+img{-webkit-user-drag:none;}
+input,textarea,[contenteditable="true"]{-webkit-user-select:text;user-select:text;}
 </style>
 </head>
 <body>
@@ -274,5 +282,15 @@ table.res tr.me td{color:var(--amber);font-weight:700;}
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
 <script src="js/game.js"></script>
+<script id="mobile-touch-fix-js">
+(function(){
+  var editable=function(t){return t&&t.closest&&t.closest('input,textarea,[contenteditable="true"]');};
+  document.addEventListener('contextmenu',function(e){if(!editable(e.target))e.preventDefault();});
+  document.addEventListener('selectstart',function(e){if(!editable(e.target))e.preventDefault();});
+  document.addEventListener('dblclick',function(e){e.preventDefault();},{passive:false});
+  ['gesturestart','gesturechange','gestureend'].forEach(function(n){document.addEventListener(n,function(e){e.preventDefault();},{passive:false});});
+  document.addEventListener('touchmove',function(e){if(e.touches&&e.touches.length>1)e.preventDefault();},{passive:false});
+})();
+</script>
 </body>
 </html>
